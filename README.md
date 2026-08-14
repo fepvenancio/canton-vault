@@ -4,6 +4,8 @@ An enterprise-grade, privacy-preserving tokenized yield vault built natively for
 
 Featuring virtual share offset inflation protection, strategy allocation queues, idle physical asset pooling, and public network NAV disclosure.
 
+Detailed architecture and function specifications are available in **[docs/ARCHITECTURE.md](file:///Users/address0/Documents/Repos/canton-vault/docs/ARCHITECTURE.md)**.
+
 ---
 
 ## Key Architecture & Features
@@ -26,6 +28,8 @@ Featuring virtual share offset inflation protection, strategy allocation queues,
 ## Directory Structure
 
 ```text
+docs/
+└── ARCHITECTURE.md                 # Complete technical documentation & function reference
 daml/
 ├── CIP0056/
 │   └── SimpleHolding.daml          # CIP-0056 Token Holding implementation
@@ -58,4 +62,4 @@ dpm test
 
 ## License
 
-Apache-2.0
+[MIT License](LICENSE)
