@@ -1,11 +1,13 @@
 -- | Master Vault State contract template managing total pooled assets, total shares,
--- yield accrual, physical asset pool UTXOs, and strategy allocations for Canton Vaults.
+-- yield accrual, physical asset pool UTXOs, strategy allocations, and institutional sanctions enforcement for Canton Vaults.
 module CantonVault.VaultState where
 
 import DA.Action (when)
+import DA.List (delete)
 import CIP0056.SimpleHolding
 import CantonVault.Types
 import CantonVault.Strategy
+import CantonVault.Compliance
 
 -- | Main Vault State contract instance.
 template VaultState
@@ -14,13 +16,17 @@ template VaultState
     totalAssets : Decimal
     totalShares : Decimal
     isPaused : Bool
+    isPermissioned : Bool                                       -- ^ Enforces explicit allowlisting mode
+    allowlist : [Party]                                         -- ^ Approved institutional depositor parties
+    sanctionedParties : [Party]                                 -- ^ Blacklisted sanctioned parties
+    frozenParties : [Party]                                     -- ^ Tainted/frozen parties blocked from transacting
     observers : [Party]
     publicObservers : [Party]                                   -- ^ Public network observers for NAV disclosure
     vaultAssetHoldingCid : Optional (ContractId SimpleHolding)  -- ^ Idle physical asset pool holding UTXO
     strategyAssets : Decimal                                    -- ^ Assets deployed in strategy markets
   where
     signatory config.vaultId.provider
-    observer observers
+    observer observers ++ config.regulatorObservers
     ensure totalAssets >= 0.0 && totalShares >= 0.0 && strategyAssets >= 0.0
 
     -- | Query current vault exchange rate statistics.
@@ -51,6 +57,110 @@ template VaultState
           sharePrice
           idleAssets
           strategyAssets
+
+    -- | Update Vault Allowlist (Compliance Officer / Provider).
+    choice VaultState_UpdateAllowlist : ContractId VaultState
+      with
+        partyToUpdate : Party
+        add : Bool
+      controller config.vaultId.provider
+      do
+        let newAllowlist =
+              if add then
+                if partyToUpdate `elem` allowlist then allowlist else partyToUpdate :: allowlist
+              else delete partyToUpdate allowlist
+        create this with allowlist = newAllowlist
+
+    -- | Update Vault Sanctions Blacklist (Compliance Officer / Provider).
+    choice VaultState_UpdateSanctionedParties : ContractId VaultState
+      with
+        partyToBlacklist : Party
+        blacklisted : Bool
+      controller config.vaultId.provider
+      do
+        let newSanctioned =
+              if blacklisted then
+                if partyToBlacklist `elem` sanctionedParties then sanctionedParties else partyToBlacklist :: sanctionedParties
+              else delete partyToBlacklist sanctionedParties
+        create this with sanctionedParties = newSanctioned
+
+    -- | Freeze or unfreeze a tainted party's shares (Compliance Officer / Provider).
+    choice VaultState_SetPartyFreeze : ContractId VaultState
+      with
+        targetParty : Party
+        frozen : Bool
+      controller config.vaultId.provider
+      do
+        let newFrozen =
+              if frozen then
+                if targetParty `elem` frozenParties then frozenParties else targetParty :: frozenParties
+              else delete targetParty frozenParties
+        create this with frozenParties = newFrozen
+
+    -- | Forcibly liquidate and redeem a sanctioned party's shares, transferring underlying assets into legal escrow.
+    choice VaultState_ForceRedeemSanctioned : (ContractId VaultState, ContractId SanctionedEscrowHolding)
+      with
+        sanctionedParty : Party
+        inputShareHoldingCid : ContractId SimpleHolding
+        sharesToRedeem : Decimal
+        reason : Text
+      controller config.vaultId.provider, sanctionedParty
+      do
+        assertMsg "Target party must be on sanctioned list" (sanctionedParty `elem` sanctionedParties || sanctionedParty `elem` frozenParties)
+        assertMsg "Shares to redeem must be positive" (sharesToRedeem > 0.0)
+
+        shareHolding <- fetch inputShareHoldingCid
+        assertMsg "Share holding owner mismatch" (shareHolding.owner == sanctionedParty)
+        assertMsg "Share holding instrument mismatch" (shareHolding.instrumentId == config.shareInstrument)
+        assertMsg "Share holding amount insufficient" (shareHolding.amount >= sharesToRedeem)
+
+        archive inputShareHoldingCid
+
+        when (shareHolding.amount > sharesToRedeem) do
+          _ <- create SimpleHolding with
+            admin = shareHolding.admin
+            owner = sanctionedParty
+            instrumentId = config.shareInstrument
+            amount = shareHolding.amount - sharesToRedeem
+            meta = shareHolding.meta
+          pure ()
+
+        let rawAssetsToReturn = convertToAssets sharesToRedeem totalAssets totalShares config.decimalsOffset
+            assetsToReturn = if sharesToRedeem == totalShares then totalAssets else rawAssetsToReturn
+        assertMsg "Returned assets must be greater than zero" (assetsToReturn > 0.0)
+        assertMsg "Vault has insufficient total assets" (assetsToReturn <= totalAssets)
+
+        -- Withdraw assets from vault idle asset pool holding
+        newVaultAssetHoldingCid <- case vaultAssetHoldingCid of
+          Some poolCid -> do
+            poolHolding <- fetch poolCid
+            assertMsg "Vault idle asset pool insufficient for forced escrow redemption" (poolHolding.amount >= assetsToReturn)
+            archive poolCid
+            if poolHolding.amount > assetsToReturn then do
+                remCid <- create SimpleHolding with
+                  admin = poolHolding.admin
+                  owner = config.vaultId.provider
+                  instrumentId = config.underlyingInstrument
+                  amount = poolHolding.amount - assetsToReturn
+                  meta = poolHolding.meta
+                pure (Some remCid)
+              else pure None
+          None -> pure None
+
+        -- Create SanctionedEscrowHolding held in legal custody by compliance officer
+        escrowCid <- create SanctionedEscrowHolding with
+          complianceOfficer = config.vaultId.provider
+          sanctionedParty
+          instrumentId = config.underlyingInstrument
+          amount = assetsToReturn
+          reason
+
+        newVaultStateCid <- create this with
+          totalAssets = totalAssets - assetsToReturn
+          totalShares = totalShares - sharesToRedeem
+          vaultAssetHoldingCid = newVaultAssetHoldingCid
+
+        pure (newVaultStateCid, escrowCid)
 
     -- | Harvest yield earned by vault strategy with strict UTXO and accounting assertions.
     choice VaultState_HarvestYield : ContractId VaultState
@@ -191,19 +301,35 @@ template VaultState
         pure (newVaultStateCid, reqCid)
 
     -- | Execute deposit choice:
-    -- 1. Calculates shares to mint using virtual share math.
-    -- 2. Consumes old VaultState UTXO.
-    -- 3. Consumes depositor's underlying asset Holding.
-    -- 4. Merges deposit into vault asset pool UTXO.
-    -- 5. Creates Vault Share CIP-0056 Holding for depositor.
+    -- 1. Validates sanctions, freeze status, allowlist, and compliance attestations.
+    -- 2. Calculates shares to mint using virtual share math.
+    -- 3. Merges deposit into vault asset pool UTXO.
+    -- 4. Creates Vault Share CIP-0056 Holding for depositor.
     choice VaultState_Deposit : (ContractId VaultState, ContractId SimpleHolding)
       with
         depositor : Party
         inputAssetHoldingCid : ContractId SimpleHolding
         depositAmount : Decimal
-      controller depositor
+        complianceAttestationCid : Optional (ContractId ComplianceAttestation)
+      controller [depositor, config.vaultId.provider]
       do
         assertMsg "Vault is currently paused" (not isPaused)
+        assertMsg "Depositor is sanctioned" (not (depositor `elem` sanctionedParties))
+        assertMsg "Depositor account is frozen" (not (depositor `elem` frozenParties))
+
+        when isPermissioned do
+          assertMsg "Depositor not on vault allowlist" (depositor `elem` allowlist)
+
+        case complianceAttestationCid of
+          Some attCid -> do
+            att <- fetch attCid
+            assertMsg "Compliance attestation subject mismatch" (att.subject == depositor)
+            assertMsg "Depositor KYC not approved" att.isKycApproved
+            assertMsg "Depositor AML not cleared" att.isAmlCleared
+            assertMsg "Depositor failed sanctions screening" att.isSanctionsScreened
+          None -> when isPermissioned do
+            abort "Compliance attestation required for permissioned vault deposit"
+
         assertMsg "Deposit amount must be positive" (depositAmount > 0.0)
 
         holding <- fetch inputAssetHoldingCid
@@ -266,19 +392,20 @@ template VaultState
         pure (newVaultStateCid, shareHoldingCid)
 
     -- | Execute redeem choice:
-    -- 1. Calculates underlying assets to return using virtual asset math.
-    -- 2. Consumes old VaultState UTXO.
-    -- 3. Consumes redeemer's share Holding.
-    -- 4. Withdraws returned assets from vault idle asset pool UTXO.
-    -- 5. Creates underlying asset CIP-0056 Holding for redeemer.
+    -- 1. Validates sanctions and freeze status.
+    -- 2. Calculates underlying assets to return using virtual asset math.
+    -- 3. Withdraws returned assets from vault idle asset pool UTXO.
+    -- 4. Creates underlying asset CIP-0056 Holding for redeemer.
     choice VaultState_Redeem : (ContractId VaultState, ContractId SimpleHolding)
       with
         redeemer : Party
         inputShareHoldingCid : ContractId SimpleHolding
         sharesToRedeem : Decimal
-      controller redeemer
+      controller [redeemer, config.vaultId.provider]
       do
         assertMsg "Vault is currently paused" (not isPaused)
+        assertMsg "Redeemer is sanctioned" (not (redeemer `elem` sanctionedParties))
+        assertMsg "Redeemer account is frozen" (not (redeemer `elem` frozenParties))
         assertMsg "Shares to redeem must be positive" (sharesToRedeem > 0.0)
 
         shareHolding <- fetch inputShareHoldingCid
@@ -297,7 +424,8 @@ template VaultState
             meta = shareHolding.meta
           pure ()
 
-        let assetsToReturn = convertToAssets sharesToRedeem totalAssets totalShares config.decimalsOffset
+        let rawAssetsToReturn = convertToAssets sharesToRedeem totalAssets totalShares config.decimalsOffset
+            assetsToReturn = if sharesToRedeem == totalShares then totalAssets else rawAssetsToReturn
         assertMsg "Returned assets must be greater than zero" (assetsToReturn > 0.0)
         assertMsg "Vault has insufficient total assets" (assetsToReturn <= totalAssets)
 

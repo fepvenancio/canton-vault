@@ -18,6 +18,7 @@ data VaultConfig = VaultConfig
     underlyingInstrument : InstrumentId
     shareInstrument : InstrumentId
     decimalsOffset : Int  -- ^ Virtual Share Offset (default: 3 -> 10^3)
+    regulatorObservers : [Party] -- ^ Designated regulatory observer nodes
   deriving (Eq, Show)
 
 -- | Vault Statistics & Exchange Rate Metrics.

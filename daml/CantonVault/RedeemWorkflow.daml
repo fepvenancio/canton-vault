@@ -25,7 +25,7 @@ template RedeemRequest
 
     -- | VaultProvider accepts redeem request and executes VaultState_Redeem.
     choice RedeemRequest_Accept : (ContractId VaultState, ContractId SimpleHolding)
-      controller provider
+      controller provider, redeemer
       do
         exercise vaultStateCid VaultState_Redeem with
           redeemer

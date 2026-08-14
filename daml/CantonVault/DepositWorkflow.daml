@@ -2,6 +2,7 @@
 module CantonVault.DepositWorkflow where
 
 import CIP0056.SimpleHolding
+import CantonVault.Compliance
 import CantonVault.VaultState
 
 -- | Deposit Request contract proposed by a depositor.
@@ -12,6 +13,7 @@ template DepositRequest
     vaultStateCid : ContractId VaultState
     inputAssetHoldingCid : ContractId SimpleHolding
     depositAmount : Decimal
+    complianceAttestationCid : Optional (ContractId ComplianceAttestation)
   where
     signatory depositor
     observer provider
@@ -25,9 +27,10 @@ template DepositRequest
 
     -- | VaultProvider accepts deposit request and executes VaultState_Deposit.
     choice DepositRequest_Accept : (ContractId VaultState, ContractId SimpleHolding)
-      controller provider
+      controller provider, depositor
       do
         exercise vaultStateCid VaultState_Deposit with
           depositor
           inputAssetHoldingCid
           depositAmount
+          complianceAttestationCid

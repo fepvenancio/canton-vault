@@ -1,0 +1,43 @@
+-- | Institutional Compliance, KYC/AML Attestations, and Sanctioned Escrow Module for Canton Vaults.
+module CantonVault.Compliance where
+
+import Splice.Api.Token.HoldingV1
+
+-- | On-chain Identity & Compliance Attestation issued by an authorized Compliance Officer or Custodian.
+template ComplianceAttestation
+  with
+    issuer : Party
+    subject : Party
+    isKycApproved : Bool
+    isAmlCleared : Bool
+    isSanctionsScreened : Bool
+    jurisdiction : Text
+  where
+    signatory issuer
+    observer subject
+
+    -- | Issuer updates compliance status.
+    choice ComplianceAttestation_Update : ContractId ComplianceAttestation
+      with
+        newKycApproved : Bool
+        newAmlCleared : Bool
+        newSanctionsScreened : Bool
+      controller issuer
+      do
+        create this with
+          isKycApproved = newKycApproved
+          isAmlCleared = newAmlCleared
+          isSanctionsScreened = newSanctionsScreened
+
+-- | Segregated Escrow Contract holding assets seized/frozen from sanctioned parties under legal order.
+template SanctionedEscrowHolding
+  with
+    complianceOfficer : Party
+    sanctionedParty : Party
+    instrumentId : InstrumentId
+    amount : Decimal
+    reason : Text
+  where
+    signatory complianceOfficer
+    observer sanctionedParty
+    ensure amount > 0.0
