@@ -1,0 +1,33 @@
+-- | 2-Step Asynchronous Redeem Request & Execution Workflow for Canton ERC-4626 Vaults.
+module ERC4626.RedeemWorkflow where
+
+import CIP0056.SimpleHolding
+import ERC4626.VaultState
+
+-- | Redeem Request contract proposed by a share holder.
+template RedeemRequest
+  with
+    provider : Party
+    redeemer : Party
+    vaultStateCid : ContractId VaultState
+    inputShareHoldingCid : ContractId SimpleHolding
+    sharesToRedeem : Decimal
+  where
+    signatory redeemer
+    observer provider
+    ensure sharesToRedeem > 0.0
+
+    -- | Redeemer can cancel pending redeem request.
+    choice RedeemRequest_Cancel : ()
+      controller redeemer
+      do
+        pure ()
+
+    -- | VaultProvider accepts redeem request and executes VaultState_Redeem.
+    choice RedeemRequest_Accept : (ContractId VaultState, ContractId SimpleHolding)
+      controller provider
+      do
+        exercise vaultStateCid VaultState_Redeem with
+          redeemer
+          inputShareHoldingCid
+          sharesToRedeem

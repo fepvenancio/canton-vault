@@ -1,0 +1,333 @@
+-- | Master Vault State contract template managing total pooled assets, total shares,
+-- yield accrual, physical asset pool UTXOs, and strategy allocations for Canton EVM ERC-4626 Vaults.
+module ERC4626.VaultState where
+
+import DA.Action (when)
+import CIP0056.SimpleHolding
+import ERC4626.Types
+import ERC4626.Strategy
+
+-- | Main Vault State contract instance.
+template VaultState
+  with
+    config : VaultConfig
+    totalAssets : Decimal
+    totalShares : Decimal
+    isPaused : Bool
+    observers : [Party]
+    publicObservers : [Party]                                   -- ^ Public network observers for NAV disclosure
+    vaultAssetHoldingCid : Optional (ContractId SimpleHolding)  -- ^ Idle physical asset pool holding UTXO
+    strategyAssets : Decimal                                    -- ^ Assets deployed in strategy markets
+  where
+    signatory config.vaultId.provider
+    observer observers
+    ensure totalAssets >= 0.0 && totalShares >= 0.0 && strategyAssets >= 0.0
+
+    -- | Query current vault exchange rate statistics.
+    nonconsuming choice VaultState_GetStats : VaultStats
+      with
+        caller : Party
+      controller caller
+      do
+        let sharePrice =
+              if totalShares == 0.0 then 1.0
+              else totalAssets / totalShares
+        pure VaultStats with totalAssets; totalShares; sharePrice
+
+    -- | Query public NAV metrics structure.
+    nonconsuming choice VaultState_GetPublicNAVData : PublicVaultNAVData
+      with
+        caller : Party
+      controller caller
+      do
+        let sharePrice =
+              if totalShares == 0.0 then 1.0
+              else totalAssets / totalShares
+            idleAssets = totalAssets - strategyAssets
+        pure PublicVaultNAVData with
+          vaultId = config.vaultId
+          totalAssets
+          totalShares
+          sharePrice
+          idleAssets
+          strategyAssets
+
+    -- | Harvest yield earned by vault strategy with strict UTXO and accounting assertions.
+    choice VaultState_HarvestYield : ContractId VaultState
+      with
+        yieldAmount : Decimal
+        returnedYieldHoldingCid : Optional (ContractId SimpleHolding)
+      controller config.vaultId.provider
+      do
+        assertMsg "Yield amount must be positive" (yieldAmount > 0.0)
+        assertMsg "Vault is paused" (not isPaused)
+
+        -- Merge physical yield holding into vault asset pool if provided
+        newAssetHoldingCid <- case (vaultAssetHoldingCid, returnedYieldHoldingCid) of
+          (Some poolCid, Some yieldCid) -> do
+            poolHolding <- fetch poolCid
+            yieldHolding <- fetch yieldCid
+
+            -- Strict security assertions matching physical token UTXOs
+            assertMsg "Yield holding owner mismatch" (yieldHolding.owner == config.vaultId.provider)
+            assertMsg "Yield holding instrument mismatch" (yieldHolding.instrumentId == config.underlyingInstrument)
+            assertMsg "Yield holding amount mismatch with declared yieldAmount" (yieldHolding.amount == yieldAmount)
+
+            archive poolCid
+            archive yieldCid
+            mergedCid <- create SimpleHolding with
+              admin = poolHolding.admin
+              owner = config.vaultId.provider
+              instrumentId = config.underlyingInstrument
+              amount = poolHolding.amount + yieldHolding.amount
+              meta = poolHolding.meta
+            pure (Some mergedCid)
+          (None, Some yieldCid) -> do
+            yieldHolding <- fetch yieldCid
+            assertMsg "Yield holding owner mismatch" (yieldHolding.owner == config.vaultId.provider)
+            assertMsg "Yield holding instrument mismatch" (yieldHolding.instrumentId == config.underlyingInstrument)
+            assertMsg "Yield holding amount mismatch with declared yieldAmount" (yieldHolding.amount == yieldAmount)
+            pure (Some yieldCid)
+          (poolOpt, None) -> pure poolOpt
+
+        create this with
+          totalAssets = totalAssets + yieldAmount
+          vaultAssetHoldingCid = newAssetHoldingCid
+
+    -- | De-allocate strategy principal back into vault idle asset pool, updating strategyAssets balance.
+    choice VaultState_DeallocateFromStrategy : ContractId VaultState
+      with
+        principalAmount : Decimal
+        returnedPrincipalHoldingCid : ContractId SimpleHolding
+      controller config.vaultId.provider
+      do
+        assertMsg "Principal amount must be positive" (principalAmount > 0.0)
+        assertMsg "De-allocation amount exceeds deployed strategy assets" (principalAmount <= strategyAssets)
+
+        principalHolding <- fetch returnedPrincipalHoldingCid
+        assertMsg "Returned principal owner mismatch" (principalHolding.owner == config.vaultId.provider)
+        assertMsg "Returned principal instrument mismatch" (principalHolding.instrumentId == config.underlyingInstrument)
+        assertMsg "Returned principal amount mismatch" (principalHolding.amount == principalAmount)
+
+        -- Merge returned principal holding into idle pool
+        newAssetHoldingCid <- case vaultAssetHoldingCid of
+          Some poolCid -> do
+            poolHolding <- fetch poolCid
+            archive poolCid
+            archive returnedPrincipalHoldingCid
+            mergedCid <- create SimpleHolding with
+              admin = poolHolding.admin
+              owner = config.vaultId.provider
+              instrumentId = config.underlyingInstrument
+              amount = poolHolding.amount + principalHolding.amount
+              meta = poolHolding.meta
+            pure (Some mergedCid)
+          None -> pure (Some returnedPrincipalHoldingCid)
+
+        create this with
+          strategyAssets = strategyAssets - principalAmount
+          vaultAssetHoldingCid = newAssetHoldingCid
+
+    -- | Emergency Pause choice.
+    choice VaultState_SetPause : ContractId VaultState
+      with
+        paused : Bool
+      controller config.vaultId.provider
+      do
+        create this with isPaused = paused
+
+    -- | Create a 2-Step Strategy Allocation Request to deploy idle USDC to an external Yield Strategy.
+    choice VaultState_ProposeStrategyAllocation : (ContractId VaultState, ContractId StrategyAllocationRequest)
+      with
+        strategyParty : Party
+        strategyId : Text
+        amountToAllocate : Decimal
+      controller config.vaultId.provider
+      do
+        assertMsg "Vault is currently paused" (not isPaused)
+        assertMsg "Allocation amount must be positive" (amountToAllocate > 0.0)
+
+        poolCid <- case vaultAssetHoldingCid of
+          Some cid -> pure cid
+          None -> abort "Vault idle asset pool is empty"
+
+        poolHolding <- fetch poolCid
+        assertMsg "Insufficient vault idle assets for allocation" (poolHolding.amount >= amountToAllocate)
+
+        archive poolCid
+
+        -- Create leftover vault idle pool holding if partial allocation
+        newPoolCid <- if poolHolding.amount > amountToAllocate then do
+            cid <- create SimpleHolding with
+              admin = poolHolding.admin
+              owner = config.vaultId.provider
+              instrumentId = config.underlyingInstrument
+              amount = poolHolding.amount - amountToAllocate
+              meta = poolHolding.meta
+            pure (Some cid)
+          else pure None
+
+        -- Create asset holding designated for strategy allocation
+        allocatedHoldingCid <- create SimpleHolding with
+          admin = poolHolding.admin
+          owner = config.vaultId.provider
+          instrumentId = config.underlyingInstrument
+          amount = amountToAllocate
+          meta = poolHolding.meta
+
+        -- Create StrategyAllocationRequest 2-step tracking contract
+        reqCid <- create StrategyAllocationRequest with
+          provider = config.vaultId.provider
+          strategyParty
+          vaultId = config.vaultId
+          strategyId
+          allocatedAssetHoldingCid = allocatedHoldingCid
+          amountToAllocate
+
+        newVaultStateCid <- create this with
+          vaultAssetHoldingCid = newPoolCid
+          strategyAssets = strategyAssets + amountToAllocate
+
+        pure (newVaultStateCid, reqCid)
+
+    -- | Execute deposit choice:
+    -- 1. Calculates shares to mint using OpenZeppelin ERC-4626 virtual share math.
+    -- 2. Consumes old VaultState UTXO.
+    -- 3. Consumes depositor's underlying asset Holding.
+    -- 4. Merges deposit into vault asset pool UTXO.
+    -- 5. Creates Vault Share CIP-0056 Holding for depositor.
+    choice VaultState_Deposit : (ContractId VaultState, ContractId SimpleHolding)
+      with
+        depositor : Party
+        inputAssetHoldingCid : ContractId SimpleHolding
+        depositAmount : Decimal
+      controller depositor
+      do
+        assertMsg "Vault is currently paused" (not isPaused)
+        assertMsg "Deposit amount must be positive" (depositAmount > 0.0)
+
+        holding <- fetch inputAssetHoldingCid
+        assertMsg "Holding owner mismatch" (holding.owner == depositor)
+        assertMsg "Holding instrument mismatch" (holding.instrumentId == config.underlyingInstrument)
+        assertMsg "Holding amount insufficient" (holding.amount >= depositAmount)
+
+        archive inputAssetHoldingCid
+
+        when (holding.amount > depositAmount) do
+          _ <- create SimpleHolding with
+            admin = holding.admin
+            owner = depositor
+            instrumentId = config.underlyingInstrument
+            amount = holding.amount - depositAmount
+            meta = holding.meta
+          pure ()
+
+        -- Update or create vault pooled idle asset holding
+        newVaultAssetHoldingCid <- case vaultAssetHoldingCid of
+          Some poolCid -> do
+            poolHolding <- fetch poolCid
+            archive poolCid
+            mergedCid <- create SimpleHolding with
+              admin = poolHolding.admin
+              owner = config.vaultId.provider
+              instrumentId = config.underlyingInstrument
+              amount = poolHolding.amount + depositAmount
+              meta = poolHolding.meta
+            pure (Some mergedCid)
+          None -> do
+            newPoolCid <- create SimpleHolding with
+              admin = config.vaultId.provider
+              owner = config.vaultId.provider
+              instrumentId = config.underlyingInstrument
+              amount = depositAmount
+              meta = holding.meta
+            pure (Some newPoolCid)
+
+        let sharesToMint = convertToShares depositAmount totalAssets totalShares config.decimalsOffset
+        assertMsg "Minted shares must be greater than zero" (sharesToMint > 0.0)
+
+        shareHoldingCid <- create SimpleHolding with
+          admin = config.vaultId.provider
+          owner = depositor
+          instrumentId = config.shareInstrument
+          amount = sharesToMint
+          meta = holding.meta
+
+        let updatedObservers =
+              if depositor `elem` observers then observers
+              else depositor :: observers
+
+        newVaultStateCid <- create this with
+          totalAssets = totalAssets + depositAmount
+          totalShares = totalShares + sharesToMint
+          observers = updatedObservers
+          vaultAssetHoldingCid = newVaultAssetHoldingCid
+
+        pure (newVaultStateCid, shareHoldingCid)
+
+    -- | Execute redeem choice:
+    -- 1. Calculates underlying assets to return using OpenZeppelin ERC-4626 virtual asset math.
+    -- 2. Consumes old VaultState UTXO.
+    -- 3. Consumes redeemer's share Holding.
+    -- 4. Withdraws returned assets from vault idle asset pool UTXO.
+    -- 5. Creates underlying asset CIP-0056 Holding for redeemer.
+    choice VaultState_Redeem : (ContractId VaultState, ContractId SimpleHolding)
+      with
+        redeemer : Party
+        inputShareHoldingCid : ContractId SimpleHolding
+        sharesToRedeem : Decimal
+      controller redeemer
+      do
+        assertMsg "Vault is currently paused" (not isPaused)
+        assertMsg "Shares to redeem must be positive" (sharesToRedeem > 0.0)
+
+        shareHolding <- fetch inputShareHoldingCid
+        assertMsg "Share holding owner mismatch" (shareHolding.owner == redeemer)
+        assertMsg "Share holding instrument mismatch" (shareHolding.instrumentId == config.shareInstrument)
+        assertMsg "Share holding amount insufficient" (shareHolding.amount >= sharesToRedeem)
+
+        archive inputShareHoldingCid
+
+        when (shareHolding.amount > sharesToRedeem) do
+          _ <- create SimpleHolding with
+            admin = shareHolding.admin
+            owner = redeemer
+            instrumentId = config.shareInstrument
+            amount = shareHolding.amount - sharesToRedeem
+            meta = shareHolding.meta
+          pure ()
+
+        let assetsToReturn = convertToAssets sharesToRedeem totalAssets totalShares config.decimalsOffset
+        assertMsg "Returned assets must be greater than zero" (assetsToReturn > 0.0)
+        assertMsg "Vault has insufficient total assets" (assetsToReturn <= totalAssets)
+
+        -- Withdraw assets from vault idle asset pool holding if present
+        newVaultAssetHoldingCid <- case vaultAssetHoldingCid of
+          Some poolCid -> do
+            poolHolding <- fetch poolCid
+            assertMsg "Vault idle physical asset pool insufficient for instant redemption" (poolHolding.amount >= assetsToReturn)
+            archive poolCid
+            if poolHolding.amount > assetsToReturn then do
+                remCid <- create SimpleHolding with
+                  admin = poolHolding.admin
+                  owner = config.vaultId.provider
+                  instrumentId = config.underlyingInstrument
+                  amount = poolHolding.amount - assetsToReturn
+                  meta = poolHolding.meta
+                pure (Some remCid)
+              else pure None
+          None -> pure None
+
+        assetHoldingCid <- create SimpleHolding with
+          admin = config.vaultId.provider
+          owner = redeemer
+          instrumentId = config.underlyingInstrument
+          amount = assetsToReturn
+          meta = shareHolding.meta
+
+        newVaultStateCid <- create this with
+          totalAssets = totalAssets - assetsToReturn
+          totalShares = totalShares - sharesToRedeem
+          vaultAssetHoldingCid = newVaultAssetHoldingCid
+
+        pure (newVaultStateCid, assetHoldingCid)

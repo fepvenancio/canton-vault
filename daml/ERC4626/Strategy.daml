@@ -1,0 +1,89 @@
+-- | Strategy Allocation & External Yield Generation Module for Canton ERC-4626 Vaults.
+module ERC4626.Strategy where
+
+import CIP0056.SimpleHolding
+import ERC4626.Types
+
+-- | Tracks an active deployment of vault principal to an external yield strategy adapter.
+template StrategyAllocation
+  with
+    provider : Party
+    strategyParty : Party
+    vaultId : VaultId
+    strategyId : Text
+    principalInvested : Decimal
+  where
+    signatory provider, strategyParty
+    ensure principalInvested > 0.0
+
+    -- | Strategy adapter returns original principal plus accrued yield back to Vault.
+    choice Strategy_ReturnAssetsAndYield : (Decimal, ContractId SimpleHolding)
+      with
+        returnedHoldingCid : ContractId SimpleHolding
+      controller strategyParty
+      do
+        returnedHolding <- fetch returnedHoldingCid
+        assertMsg "Returned holding owner mismatch" (returnedHolding.owner == provider)
+        assertMsg "Returned holding amount insufficient for principal" (returnedHolding.amount >= principalInvested)
+
+        let yieldEarned = returnedHolding.amount - principalInvested
+        pure (yieldEarned, returnedHoldingCid)
+
+    -- | Strategy adapter de-allocates principal back to VaultProvider for idle liquidity restocking.
+    choice Strategy_DeallocatePrincipal : ContractId SimpleHolding
+      with
+        returnedPrincipalHoldingCid : ContractId SimpleHolding
+        principalAmountToReturn : Decimal
+      controller strategyParty
+      do
+        returnedHolding <- fetch returnedPrincipalHoldingCid
+        assertMsg "Returned principal owner mismatch" (returnedHolding.owner == provider)
+        assertMsg "Returned principal amount mismatch" (returnedHolding.amount == principalAmountToReturn)
+        assertMsg "Returned principal exceeds invested amount" (principalAmountToReturn <= principalInvested)
+
+        pure returnedPrincipalHoldingCid
+
+-- | 2-Step Strategy Allocation Request proposed by VaultProvider.
+template StrategyAllocationRequest
+  with
+    provider : Party
+    strategyParty : Party
+    vaultId : VaultId
+    strategyId : Text
+    allocatedAssetHoldingCid : ContractId SimpleHolding
+    amountToAllocate : Decimal
+  where
+    signatory provider
+    observer strategyParty
+    ensure amountToAllocate > 0.0
+
+    -- | Provider can cancel pending allocation request.
+    choice StrategyAllocationRequest_Cancel : ContractId SimpleHolding
+      controller provider
+      do
+        pure allocatedAssetHoldingCid
+
+    -- | Strategy adapter accepts allocation request and activates StrategyAllocation.
+    choice StrategyAllocationRequest_Accept : (ContractId StrategyAllocation, ContractId SimpleHolding)
+      controller strategyParty
+      do
+        holding <- fetch allocatedAssetHoldingCid
+        assertMsg "Holding amount mismatch" (holding.amount == amountToAllocate)
+
+        -- Re-assign asset holding owner to strategyParty
+        archive allocatedAssetHoldingCid
+        strategyAssetHoldingCid <- create SimpleHolding with
+          admin = holding.admin
+          owner = strategyParty
+          instrumentId = holding.instrumentId
+          amount = holding.amount
+          meta = holding.meta
+
+        allocationCid <- create StrategyAllocation with
+          provider
+          strategyParty
+          vaultId
+          strategyId
+          principalInvested = amountToAllocate
+
+        pure (allocationCid, strategyAssetHoldingCid)

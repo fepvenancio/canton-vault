@@ -1,0 +1,58 @@
+-- | CIP-0056 Compliant Token Holding Implementation based on OpenZeppelin Canton Token Standard.
+module CIP0056.SimpleHolding where
+
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.MetadataV1
+
+-- | Simple, unlocked CIP-0056 token holding.
+-- Used for both underlying assets (e.g. USDC) and Vault Share tokens (e.g. vUSDC).
+template SimpleHolding
+  with
+    admin : Party
+    owner : Party
+    instrumentId : InstrumentId
+    amount : Decimal
+    meta : Metadata
+  where
+    signatory admin, owner
+    ensure amount > 0.0
+
+    interface instance Holding for SimpleHolding where
+      view = HoldingView with
+        owner
+        instrumentId
+        amount
+        lock = None
+        meta
+
+-- | Locked CIP-0056 token holding used during deposit/redeem pending state.
+template LockedHolding
+  with
+    admin : Party
+    owner : Party
+    instrumentId : InstrumentId
+    amount : Decimal
+    lock : Lock
+    extraObservers : [Party]
+    meta : Metadata
+  where
+    signatory admin, owner, lock.holders
+    observer extraObservers
+    ensure amount > 0.0
+
+    interface instance Holding for LockedHolding where
+      view = HoldingView with
+        owner
+        instrumentId
+        amount
+        lock = Some lock
+        meta
+
+    choice LockedHolding_Unlock : ContractId SimpleHolding
+      controller owner
+      do
+        now <- getTime
+        case lock.expiresAt of
+          None -> fail "Lock has no expiry date"
+          Some t -> assertMsg "Lock has not expired yet" (now >= t)
+        create SimpleHolding with admin; owner; instrumentId; amount; meta

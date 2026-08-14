@@ -1,0 +1,33 @@
+-- | 2-Step Asynchronous Deposit Request & Execution Workflow for Canton ERC-4626 Vaults.
+module ERC4626.DepositWorkflow where
+
+import CIP0056.SimpleHolding
+import ERC4626.VaultState
+
+-- | Deposit Request contract proposed by a depositor.
+template DepositRequest
+  with
+    provider : Party
+    depositor : Party
+    vaultStateCid : ContractId VaultState
+    inputAssetHoldingCid : ContractId SimpleHolding
+    depositAmount : Decimal
+  where
+    signatory depositor
+    observer provider
+    ensure depositAmount > 0.0
+
+    -- | Depositor can cancel pending deposit request.
+    choice DepositRequest_Cancel : ()
+      controller depositor
+      do
+        pure ()
+
+    -- | VaultProvider accepts deposit request and executes VaultState_Deposit.
+    choice DepositRequest_Accept : (ContractId VaultState, ContractId SimpleHolding)
+      controller provider
+      do
+        exercise vaultStateCid VaultState_Deposit with
+          depositor
+          inputAssetHoldingCid
+          depositAmount
