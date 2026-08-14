@@ -1,8 +1,8 @@
--- | Public NAV & Exchange Rate Disclosure Contract for Canton ERC-4626 Vaults.
+-- | Public NAV & Exchange Rate Disclosure Contract for Canton Vaults.
 -- Allows public participants, dApps, and indexers to query real-time NAV without revealing private UTXOs.
-module ERC4626.PublicNAV where
+module CantonVault.PublicNAV where
 
-import ERC4626.Types
+import CantonVault.Types
 
 -- | Public NAV Contract Instance.
 template PublicVaultNAV

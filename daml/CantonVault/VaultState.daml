@@ -1,11 +1,11 @@
 -- | Master Vault State contract template managing total pooled assets, total shares,
--- yield accrual, physical asset pool UTXOs, and strategy allocations for Canton EVM ERC-4626 Vaults.
-module ERC4626.VaultState where
+-- yield accrual, physical asset pool UTXOs, and strategy allocations for Canton Vaults.
+module CantonVault.VaultState where
 
 import DA.Action (when)
 import CIP0056.SimpleHolding
-import ERC4626.Types
-import ERC4626.Strategy
+import CantonVault.Types
+import CantonVault.Strategy
 
 -- | Main Vault State contract instance.
 template VaultState
@@ -191,7 +191,7 @@ template VaultState
         pure (newVaultStateCid, reqCid)
 
     -- | Execute deposit choice:
-    -- 1. Calculates shares to mint using OpenZeppelin ERC-4626 virtual share math.
+    -- 1. Calculates shares to mint using virtual share math.
     -- 2. Consumes old VaultState UTXO.
     -- 3. Consumes depositor's underlying asset Holding.
     -- 4. Merges deposit into vault asset pool UTXO.
@@ -232,7 +232,7 @@ template VaultState
               owner = config.vaultId.provider
               instrumentId = config.underlyingInstrument
               amount = poolHolding.amount + depositAmount
-              meta = poolHolding.meta
+              meta = holding.meta
             pure (Some mergedCid)
           None -> do
             newPoolCid <- create SimpleHolding with
@@ -266,7 +266,7 @@ template VaultState
         pure (newVaultStateCid, shareHoldingCid)
 
     -- | Execute redeem choice:
-    -- 1. Calculates underlying assets to return using OpenZeppelin ERC-4626 virtual asset math.
+    -- 1. Calculates underlying assets to return using virtual asset math.
     -- 2. Consumes old VaultState UTXO.
     -- 3. Consumes redeemer's share Holding.
     -- 4. Withdraws returned assets from vault idle asset pool UTXO.

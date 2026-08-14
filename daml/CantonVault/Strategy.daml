@@ -1,8 +1,8 @@
--- | Strategy Allocation & External Yield Generation Module for Canton ERC-4626 Vaults.
-module ERC4626.Strategy where
+-- | Strategy Allocation & External Yield Generation Module for Canton Vaults.
+module CantonVault.Strategy where
 
 import CIP0056.SimpleHolding
-import ERC4626.Types
+import CantonVault.Types
 
 -- | Tracks an active deployment of vault principal to an external yield strategy adapter.
 template StrategyAllocation

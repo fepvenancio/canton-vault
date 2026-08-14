@@ -1,6 +1,6 @@
 -- | Core data types, mathematical calculations, and virtual share offset logic
--- for Canton EVM ERC-4626 Tokenized Vaults.
-module ERC4626.Types where
+-- for Canton Vault instances.
+module CantonVault.Types where
 
 import Splice.Api.Token.HoldingV1
 
@@ -17,7 +17,7 @@ data VaultConfig = VaultConfig
     vaultId : VaultId
     underlyingInstrument : InstrumentId
     shareInstrument : InstrumentId
-    decimalsOffset : Int  -- ^ OpenZeppelin ERC-4626 Virtual Share Offset (default: 3 -> 10^3)
+    decimalsOffset : Int  -- ^ Virtual Share Offset (default: 3 -> 10^3)
   deriving (Eq, Show)
 
 -- | Vault Statistics & Exchange Rate Metrics.
@@ -50,7 +50,7 @@ calcOffset exp =
   else 10.0 * calcOffset (exp - 1)
 
 -- | Calculate shares to mint for a given deposit asset amount.
--- OpenZeppelin ERC-4626 Virtual Shares Math:
+-- Virtual Shares Math:
 -- shares = (assets * (totalShares + 10^offset)) / (totalAssets + 1)
 -- Truncates at Daml Decimal fixed precision (10 decimal places = 10^-10 atomic units).
 convertToShares : Decimal -> Decimal -> Decimal -> Int -> Decimal
@@ -60,7 +60,7 @@ convertToShares depositAssets totalAssets totalShares offsetExp =
   in (depositAssets * virtualShares) / virtualAssets
 
 -- | Calculate underlying assets to return for a given share redemption amount.
--- OpenZeppelin ERC-4626 Virtual Assets Math:
+-- Virtual Assets Math:
 -- assets = (shares * (totalAssets + 1)) / (totalShares + 10^offset)
 -- Truncates at Daml Decimal fixed precision (10 decimal places = 10^-10 atomic units).
 convertToAssets : Decimal -> Decimal -> Decimal -> Int -> Decimal

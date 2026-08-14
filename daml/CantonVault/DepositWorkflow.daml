@@ -1,8 +1,8 @@
--- | 2-Step Asynchronous Deposit Request & Execution Workflow for Canton ERC-4626 Vaults.
-module ERC4626.DepositWorkflow where
+-- | 2-Step Asynchronous Deposit Request & Execution Workflow for Canton Vaults.
+module CantonVault.DepositWorkflow where
 
 import CIP0056.SimpleHolding
-import ERC4626.VaultState
+import CantonVault.VaultState
 
 -- | Deposit Request contract proposed by a depositor.
 template DepositRequest

@@ -1,8 +1,8 @@
--- | 2-Step Asynchronous Redeem Request & Execution Workflow for Canton ERC-4626 Vaults.
-module ERC4626.RedeemWorkflow where
+-- | 2-Step Asynchronous Redeem Request & Execution Workflow for Canton Vaults.
+module CantonVault.RedeemWorkflow where
 
 import CIP0056.SimpleHolding
-import ERC4626.VaultState
+import CantonVault.VaultState
 
 -- | Redeem Request contract proposed by a share holder.
 template RedeemRequest

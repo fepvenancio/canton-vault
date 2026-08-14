@@ -1,16 +1,16 @@
--- | Daml Script Test Suite for Canton EVM ERC-4626 Vaults.
-module ERC4626.Test.VaultSpec where
+-- | Daml Script Test Suite for Canton Vaults.
+module CantonVault.Test.VaultSpec where
 
 import Daml.Script
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.MetadataV1
 
 import CIP0056.SimpleHolding
-import ERC4626.Types
-import ERC4626.VaultState
-import ERC4626.Strategy
-import ERC4626.PublicNAV
-import ERC4626.RedeemWorkflow
+import CantonVault.Types
+import CantonVault.VaultState
+import CantonVault.Strategy
+import CantonVault.PublicNAV
+import CantonVault.RedeemWorkflow
 
 -- | Helper to construct test instrument IDs.
 makeInstrument : Party -> Text -> InstrumentId
@@ -107,9 +107,9 @@ testVaultLifecycle = script do
     exerciseCmd vaultStateCid4 VaultState_GetStats with caller = provider
   assertMsg "Vault remaining assets should be <= 1.0" (stats3.totalAssets <= 1.0)
 
--- | Comprehensive test verifying Morpho-style 2-Step Strategy Allocation, Yield Harvesting, NAV Boost, and Share Redemption.
-testMorphoStrategyYieldCycle : Script ()
-testMorphoStrategyYieldCycle = script do
+-- | Comprehensive test verifying 2-Step Strategy Allocation, Yield Harvesting, NAV Boost, and Share Redemption.
+testStrategyYieldCycle : Script ()
+testStrategyYieldCycle = script do
   provider <- allocatePartyByHint (PartyIdHint "VaultProvider")
   strategyParty <- allocatePartyByHint (PartyIdHint "YieldStrategyAdapter")
   investor <- allocatePartyByHint (PartyIdHint "Investor")
@@ -117,7 +117,7 @@ testMorphoStrategyYieldCycle = script do
 
   let usdc = makeInstrument provider "USDC"
       vUsdc = makeInstrument provider "vUSDC"
-      vaultId = VaultId with provider, id = "MorphoVault-USDC-01"
+      vaultId = VaultId with provider, id = "CantonVault-USDC-01"
       config = VaultConfig with
         vaultId
         underlyingInstrument = usdc
@@ -156,7 +156,7 @@ testMorphoStrategyYieldCycle = script do
   (vaultStateCid3, reqCid) <- submit provider do
     exerciseCmd vaultStateCid2 VaultState_ProposeStrategyAllocation with
       strategyParty
-      strategyId = "Canton-Morpho-Pool-01"
+      strategyId = "Canton-Strategy-Pool-01"
       amountToAllocate = 800.0
 
   -- 5. Strategy accepts allocation request
